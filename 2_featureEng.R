@@ -38,7 +38,6 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 
-setwd("C:/Users/David/Google Drive/Github/task-3-1-define-a-data-science-process-dgibert17")
 load(file = "DFenergy_original.Rdata")
 
 df <- cbind(df,

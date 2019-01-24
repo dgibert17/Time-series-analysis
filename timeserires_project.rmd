@@ -1,0 +1,304 @@
+---
+title: "Energy consumption analysis"
+author: "David Gibert Bosque"
+date: "October 2018"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+```{r message=FALSE, warning=FALSE, include=FALSE}
+rm(list = ls())
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+pacman::p_load(lubridate, dplyr, ggplot2, tidyr, forecast, zoo, xts, imputeTS, fpp2, TTR, astsa)
+```
+
+## 1) Feature Enginniering
+```{r}
+load(file = "DFenergy_original.Rdata")
+
+
+df = df %>%
+  mutate(global_active_power = (global_active_power/60),
+         global_reactive_power = (global_reactive_power/60),
+         total_consump = global_active_power+global_reactive_power,
+         #The 3 of them into KiloWatt hour (kWh)
+         kitchen = kitchen/1000,
+         laundry_room = laundry_room/1000,
+         heater_conditioner = heater_conditioner/1000,
+         #Submeters already in kWh
+         total_rest = total_consump -kitchen -laundry_room -heater_conditioner,
+         total_submeter = kitchen + laundry_room + heater_conditioner,
+         #In kWh
+         
+         eur_total_consump = total_consump*0.1472,
+         eur_active = global_active_power*0.1472,
+         eur_reactive = global_reactive_power*0.1472,
+         eur_kitchen = kitchen*0.1472,
+         eur_laundry_room = laundry_room*0.1472,
+         eur_heater_conditioner = heater_conditioner*0.1472,
+         eur_submeters = eur_heater_conditioner+eur_kitchen+eur_laundry_room,
+         #Attributes containing cost $ by kWh
+         
+         date = as.Date(date, format = "%d/%m/%Y"),
+         month = as.Date(cut(date, breaks = "month")),
+         week = as.Date(cut(date, breaks = "week", start.on.monday = T))
+         
+         #total rest is energy consumed that is not measured by submeterings
+         ) %>%
+  #Gasto de submetering
+  filter(date > "2006-12-31") %>% # & date < "2010-01-01"
+  select(-time)
+```
+**IMPORTANT: TOTAL_REST SHOWS A HUGE WASTE NOT BEING MEASURED**
+
+## NA Values distribution
+```{r}
+barplot(table(df[rowSums(is.na(df)) >= 1 & rowSums(is.na(df)) < length(colnames(df))-1, 1]),
+        ylab = "Amount of NA values",
+        xlab = "Date",
+        main = "Distribution of NA values",
+        col = "lightblue")
+```
+
+## Summary of NA values
+```{r}
+statsNA(df$global_active_power)
+```
+
+## NA Values replacement
+```{r}
+df.mean = df %>%
+  select(-date, -week, -month) %>%
+  na.mean(option = "mean")
+
+df.mean = cbind(df.mean, month = df$month)
+
+df.mean = df.mean %>%
+  group_by(month) %>%
+  summarise_all(sum) %>%
+  mutate(month = as.yearmon(month))
+```
+
+## Total_consumption time series
+```{r}
+total.ts = ts(df.mean$total_consump, frequency = 12, start = 2007)
+plot(total.ts, col = "darkblue", lwd = 3, main = "Total energy consumption Time Series")
+```
+
+## Creating Train & Test Data Frames
+```{r}
+train = df.mean %>%
+  filter(month > "dic 2006" & month < "ene 2010")
+
+test = df.mean %>%
+  filter(month >= "ene 2010")
+```
+
+## Creating Train & Test Time Series - TOTAL CONSUMPTION
+```{r}
+totCons.train.ts = ts(train$total_consump, frequency = 12, start = 2007)
+totCons.test.ts = ts(test$total_consump, frequency = 12, start = 2010)
+
+par(mfrow = c(2,1))
+plot(totCons.train.ts, col = "darkblue", lwd = 3, main = "Total energy consumption Time Series\nTraining set")
+plot(totCons.test.ts, col = "darkblue", lwd = 3, main = "Total energy consumption Time Series\nTest set")
+```
+
+## Creating Train & Test Time Series - ACTIVE POWER
+```{r}
+active.train.ts = ts(train$global_active_power, frequency = 12, start = 2007)
+active.test.ts = ts(test$global_active_power, frequency = 12, start = 2010)
+
+par(mfrow = c(2,1))
+plot(active.train.ts, col = "darkblue", lwd = 3, main = "Active energy consumption Time Series\nTraining set")
+plot(active.test.ts, col = "darkblue", lwd = 3, main = "Active energy consumption Time Series\nTest set")
+```
+
+## Creating Train & Test Time Series - REACTIVE POWER
+```{r}
+reactive.train.ts = ts(train$global_reactive_power, frequency = 12, start = 2007)
+reactive.test.ts = ts(test$global_reactive_power, frequency = 12, start = 2010)
+
+par(mfrow = c(2,1))
+plot(reactive.train.ts, col = "darkblue", lwd = 3, main = "Reactive energy consumption Time Series\nTraining set")
+plot(reactive.test.ts, col = "darkblue", lwd = 3, main = "Reactive energy consumption Time Series\nTest set")
+```
+
+## Years seasonality by month
+```{r}
+ggseasonplot(total.ts, year.labels=TRUE, year.labels.left=TRUE) +
+  geom_line(size=2) +
+  geom_point(size=6) +
+  ylab("Amount consumed") +
+  ggtitle("Seasonal plot: Energy consumption")
+```
+
+## Forecasting models - TOTAL CONSUMPTION
+```{r}
+total.lm.fit = tslm(formula = totCons.train.ts ~ trend + season)
+total.lm.for = forecast(total.lm.fit, h = 12)
+
+total.hw.fit <- HoltWinters(totCons.train.ts)
+plot(total.hw.fit, main = "Forecast", xlab = "Date", ylab = "Amount", lwd = 3)
+total.hw.for = forecast(total.hw.fit, h = 12)
+
+total.arima.fit = auto.arima(totCons.train.ts)
+total.arima.for = forecast(total.arima.fit, h = 12)
+
+par(mfrow = c(3,1))
+plot(total.lm.for)
+plot(total.hw.for)
+plot(total.arima.for)
+```
+
+## Forecasting models - ACTIVE POWER CONSUMPTION
+```{r}
+active.lm.fit = tslm(formula = active.train.ts ~ trend + season)
+active.lm.for = forecast(active.lm.fit, h = 12)
+
+active.hw.fit <- HoltWinters(active.train.ts)
+plot(active.hw.fit)
+active.hw.for = forecast(active.hw.fit, h = 12)
+
+active.arima.fit = auto.arima(active.train.ts)
+active.arima.for = forecast(active.arima.fit, h = 12)
+
+par(mfrow = c(3,1))
+plot(active.lm.for)
+plot(active.hw.for)
+plot(active.arima.for)
+```
+
+## Forecasting models - REACTIVE POWER CONSUMPTION
+```{r}
+reactive.lm.fit = tslm(formula = reactive.train.ts ~ trend + season)
+reactive.lm.for = forecast(reactive.lm.fit, h = 12)
+
+reactive.hw.fit <- HoltWinters(reactive.train.ts)
+plot(reactive.hw.fit)
+reactive.hw.for = forecast(reactive.hw.fit, h = 12)
+
+reactive.arima.fit = auto.arima(reactive.train.ts)
+reactive.arima.for = forecast(reactive.arima.fit, h = 12)
+
+par(mfrow = c(3,1))
+plot(reactive.lm.for)
+plot(reactive.hw.for)
+plot(reactive.arima.for)
+```
+
+## Checking that the outlier peak comes from white noise
+```{r}
+dec = decompose(total.ts)
+par(mfrow = c(3,1))
+plot(dec$x, lwd = 3, col = "darkblue", main = "TS", ylab = "", xlab = "")
+plot(dec$seasonal, lwd = 3, col = "darkblue", main = "Seasonality", ylab = "", xlab = "")
+plot(dec$random, lwd = 3, col = "darkblue", main = "White Noise", ylab = "", xlab = "")
+```
+
+## Ploting models - TEST VS TOTAL CONSUMPTION
+```{r}
+autoplot(totCons.test.ts, ylab="Amount of power consumed", xlab="", main="Total power consumption (active + reactive) forecast") +
+  geom_line(size = 8) +
+  geom_point(size = 14) +
+  autolayer(total.arima.for, PI = F, series = "Arima", size = 2, showgap = F) +
+  autolayer(total.hw.for, PI = F, series = "Holt Winters", size = 2, showgap = F) +
+  autolayer(total.lm.for, PI = F, series = "Linear Model", size = 2, showgap = F)
+```
+
+## Ploting models - TEST VS ACTIVE CONSUMPTION
+```{r}
+autoplot(active.test.ts, ylab="Amount of power consumed", xlab="", main = "Active power consumption forecast") +
+  geom_line(size = 8) +
+  geom_point(size = 14) +
+  autolayer(active.arima.for, PI = F, series = "Arima", size = 2, showgap = F) +
+  autolayer(active.hw.for, PI = F, series = "Holt Winters", size = 2, showgap = F) +
+  autolayer(active.lm.for, PI = F, series = "Linear Model", size = 2, showgap = F)
+```
+
+## Ploting models - TEST VS REACTIVE CONSUMPTION
+```{r}
+autoplot(reactive.test.ts, ylab="Amount of power consumed", xlab="", main="Reactive power consumption forecast") +
+  geom_line(size = 8) +
+  geom_point(size = 14) +
+  autolayer(reactive.arima.for, PI = F, series = "Arima", size = 2, showgap = F) +
+  autolayer(reactive.hw.for, PI = F, series = "Holt Winters", size = 2, showgap = F) +
+  autolayer(reactive.lm.for, PI = F, series = "Linear Model", size = 2, showgap = F)
+```
+
+## Error metrics for models - TOTAL CONSUMPTION
+```{r}
+acc.hw.tot = as.data.frame(accuracy(f = total.hw.for, totCons.test.ts))[2,]
+acc.lm.tot = as.data.frame(accuracy(f = total.lm.for, totCons.test.ts))[2,]
+acc.arima.tot = as.data.frame(accuracy(f = total.arima.for, totCons.test.ts))[2,]
+
+error.total = rbind(acc.hw.tot, acc.lm.tot, acc.arima.tot)
+rownames(error.total) <- c("Holt Winters", "Linear Model", "ARIMA")
+```
+
+## Error metrics for models - ACTIVE CONSUMPTION
+```{r}
+acc.hw.active = as.data.frame(accuracy(f = active.hw.for, active.test.ts))[2,]
+acc.lm.active = as.data.frame(accuracy(f = active.lm.for, active.test.ts))[2,]
+acc.arima.active = as.data.frame(accuracy(f = active.arima.for, active.test.ts))[2,]
+
+error.active = rbind(acc.hw.active, acc.lm.active, acc.arima.active)
+rownames(error.active) <- c("Holt Winters", "Linear Model", "ARIMA")
+```
+
+## Error metrics for models - ACTIVE CONSUMPTION
+```{r}
+acc.hw.reactive = as.data.frame(accuracy(f = reactive.hw.for, reactive.test.ts))[2,]
+acc.lm.reactive = as.data.frame(accuracy(f = reactive.lm.for, reactive.test.ts))[2,]
+acc.arima.reactive = as.data.frame(accuracy(f = reactive.arima.for, reactive.test.ts))[2,]
+
+error.reactive = rbind(acc.hw.reactive, acc.lm.reactive, acc.arima.reactive)
+rownames(error.reactive) <- c("Holt Winters", "Linear Model", "ARIMA")
+
+error.total
+error.active
+error.reactive
+```
+
+## Forecast with best model - TOTAL CONSUMPTION
+```{r}
+total.fit.2011 <- HoltWinters(total.ts)
+plot(total.fit.2011)
+total.for.2011 = forecast(total.fit.2011, h = 12)
+plot(total.for.2011)
+```
+
+## Forecast with best model - ACTIVE CONSUMPTION
+```{r}
+active.ts = ts(df.mean$global_active_power, frequency = 12, start = 2007)
+
+active.fit.2011 <- HoltWinters(active.ts)
+plot(active.fit.2011)
+active.for.2011 = forecast(active.fit.2011, h = 12)
+plot(active.for.2011)
+```
+
+## Forecast with best model - REACTIVE CONSUMPTION
+```{r}
+reactive.ts = ts(df.mean$global_reactive_power, frequency = 12, start = 2007)
+
+reactive.fit.2011 <- HoltWinters(reactive.ts)
+plot(reactive.fit.2011)
+reactive.for.2011 = forecast(reactive.fit.2011, h = 12)
+plot(reactive.for.2011)
+```
+
+## Studying reactive power
+```{r}
+plot.ts(reactive.ts, col = "darkblue", lwd = 3, main = "Reactive energy consumption")
+
+plot(x = df.mean$month, y = df.mean$eur_reactive, type = "l", col = "darkblue", lwd=3,
+     xlab = "Time", ylab = "$", main = "$ for reactive power consumption")
+```
